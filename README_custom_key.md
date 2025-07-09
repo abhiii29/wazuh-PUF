@@ -127,3 +127,18 @@ flowchart TD
 - If you modify the key handling, review all usages to ensure compatibility.
 
 ---
+
+## 6. Source Files for Code Snippets
+
+Below are the files from which code snippets were quoted in this README:
+
+- **src/os_crypto/shared/keys.c**
+  - Key loading from file, key derivation for encryption, and key writing.
+- **src/addagent/manage_agents.c**
+  - Key generation if not provided (agent management code).
+- **src/headers/defs.h**
+  - Definition of the key storage file macro.
+- **src/os_crypto/aes/aes_op.c** (function signature reference)
+  - Usage example for direct key usage in code.
+
+If you need the exact line numbers or want to reference more files, see the codebase or ask for further details.

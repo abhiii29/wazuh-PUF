@@ -140,5 +140,3 @@ Below are the files from which code snippets were quoted in this README:
   - Definition of the key storage file macro.
 - **src/os_crypto/aes/aes_op.c** (function signature reference)
   - Usage example for direct key usage in code.
-
-If you need the exact line numbers or want to reference more files, see the codebase or ask for further details.

@@ -1,190 +1,172 @@
-# Wazuh
+# Using a Custom AES Key on the Wazuh Agent
 
-[![Slack](https://img.shields.io/badge/slack-join-blue.svg)](https://wazuh.com/community/join-us-on-slack/)
-[![Email](https://img.shields.io/badge/email-join-blue.svg)](https://groups.google.com/forum/#!forum/wazuh)
-[![Documentation](https://img.shields.io/badge/docs-view-green.svg)](https://documentation.wazuh.com)
-[![Documentation](https://img.shields.io/badge/web-view-green.svg)](https://wazuh.com)
-[![Coverity](https://scan.coverity.com/projects/10992/badge.svg)](https://scan.coverity.com/projects/wazuh-wazuh)
-[![Twitter](https://img.shields.io/twitter/follow/wazuh?style=social)](https://twitter.com/wazuh)
-[![YouTube](https://img.shields.io/youtube/views/peTSzcAueEc?style=social)](https://www.youtube.com/watch?v=peTSzcAueEc)
+This document explains how to adapt the Wazuh agent to use a custom AES key, ensuring compatibility with a manager that uses custom key handling. It covers how the agent currently loads, generates, derives, and uses keys, and what you must change for a custom setup.
 
+---
 
-Wazuh is a free and open source platform used for threat prevention, detection, and response. It is capable of protecting workloads across on-premises, virtualized, containerized, and cloud-based environments.
+## 1. How the Agent Currently Handles Keys
 
-Wazuh solution consists of an endpoint security agent, deployed to the monitored systems, and a management server, which collects and analyzes data gathered by the agents. Besides, Wazuh has been fully integrated with the Elastic Stack, providing a search engine and data visualization tool that allows users to navigate through their security alerts.
+### a. Key Loading from File
 
-## Wazuh capabilities
+- The agent reads its key from a file defined by the macro `KEYS_FILE` (see `src/headers/defs.h`).
+- The function responsible is `OS_ReadKeys` in `src/os_crypto/shared/keys.c`:
 
-A brief presentation of some of the more common use cases of the Wazuh solution.
+```c
+fp = wfopen(keys_file, "r");
+...
+strncpy(key, valid_str, KEYSIZE - 1);
+OS_AddKey(keys, id, name, ip, key, 0);
+```
 
-**Intrusion detection**
+### b. Key Generation (if not provided)
 
-Wazuh agents scan the monitored systems looking for malware, rootkits and suspicious anomalies. They can detect hidden files, cloaked processes or unregistered network listeners, as well as inconsistencies in system call responses.
+- If a key is not provided, it is generated using agent info, time, and random numbers, then hashed with MD5.
+- Example from `src/addagent/manage_agents.c`:
 
-In addition to agent capabilities, the server component uses a signature-based approach to intrusion detection, using its regular expression engine to analyze collected log data and look for indicators of compromise.
+```c
+os_snprintf(str1, STR_SIZE, "%d%s%d", (int)(time3 - time2), name, (int)rand1);
+os_snprintf(str2, STR_SIZE, "%d%s%s%d", (int)(time2 - time1), ip, id, (int)rand2);
+OS_MD5_Str(str1, -1, md1);
+OS_MD5_Str(str2, -1, md2);
+snprintf(key, 65, "%s%s", md1, md2);
+```
 
-**Log data analysis**
+### c. Key Derivation for Encryption
 
-Wazuh agents read operating system and application logs, and securely forward them to a central manager for rule-based analysis and storage. When no agent is deployed, the server can also receive data via syslog from network devices or applications.
+- The loaded or generated key is further processed in `OS_AddKey`:
 
-The Wazuh rules help make you aware of application or system errors, misconfigurations, attempted and/or successful malicious activities, policy violations and a variety of other security and operational issues.
+```c
+OS_MD5_Str(name, -1, filesum1);
+OS_MD5_Str(id, -1, filesum2);
+snprintf(_finalstr, sizeof(_finalstr), "%s%s", filesum1, filesum2);
+OS_MD5_Str(_finalstr, -1, filesum1);
+filesum1[15] = '\0';
+filesum1[16] = '\0';
+OS_MD5_Str(key, -1, filesum2);
+snprintf(_finalstr, sizeof(_finalstr), "%s%s", filesum2, filesum1);
+os_strdup(_finalstr, keys->keyentries[keys->keysize]->encryption_key);
+```
+- The result is stored as `encryption_key` and used for AES operations.
 
-**File integrity monitoring**
+### d. Key Usage in Encryption/Decryption
 
-Wazuh monitors the file system, identifying changes in content, permissions, ownership, and attributes of files that you need to keep an eye on. In addition, it natively identifies users and applications used to create or modify files.
+- The derived key is used in functions like `OS_AES_Str` (see `src/os_crypto/aes/aes_op.c`):
 
-File integrity monitoring capabilities can be used in combination with threat intelligence to identify threats or compromised hosts. In addition, several regulatory compliance standards, such as PCI DSS, require it.
+```c
+int OS_AES_Str(const char *input, char *output, const char *charkey, long size, short int action);
+```
+- The `charkey` argument is set to the derived key.
 
-**Vulnerability detection**
+---
 
-Wazuh agents pull software inventory data and send this information to the server, where it is correlated with continuously updated CVE (Common Vulnerabilities and Exposure) databases, in order to identify well-known vulnerable software.
+## 2. How to Implement Custom Key Handling on the Agent
 
-Automated vulnerability assessment helps you find the weak spots in your critical assets and take corrective action before attackers exploit them to sabotage your business or steal confidential data.
+### a. Using a Raw/Custom Key (Bypassing Derivation)
 
-**Configuration assessment**
+- If the manager uses a raw key (no MD5 derivation), the agent must do the same.
+- In `OS_AddKey` (in `src/os_crypto/shared/keys.c`), replace the MD5 derivation block with:
 
-Wazuh monitors system and application configuration settings to ensure they are compliant with your security policies, standards and/or hardening guides. Agents perform periodic scans to detect applications that are known to be vulnerable, unpatched, or insecurely configured.
+```c
+os_strdup(key, keys->keyentries[keys->keysize]->encryption_key);
+```
+- This ensures the agent uses the key exactly as provided by the manager.
 
-Additionally, configuration checks can be customized, tailoring them to properly align with your organization. Alerts include recommendations for better configuration, references and mapping with regulatory compliance.
+### b. Key File Format
 
-**Incident response**
+- Ensure the agent’s key file matches the manager’s format (e.g., `id name ip key`).
+- If you change the format, update the parsing logic in `OS_ReadKeys`.
 
-Wazuh provides out-of-the-box active responses to perform various countermeasures to address active threats, such as blocking access to a system from the threat source when certain criteria are met.
+### c. Key Length and Format
 
-In addition, Wazuh can be used to remotely run commands or system queries, identifying indicators of compromise (IOCs) and helping perform other live forensics or incident response tasks.
+- For AES-256, the key must be 32 bytes.
+- If the manager provides a key of a different length, ensure both sides agree on the length and padding/truncation logic.
 
-**Regulatory compliance**
+### d. Key Usage in Code
 
-Wazuh provides some of the necessary security controls to become compliant with industry standards and regulations. These features, combined with its scalability and multi-platform support help organizations meet technical compliance requirements.
+- When calling `OS_AES_Str`, pass the raw key as `charkey`:
 
-Wazuh is widely used by payment processing companies and financial institutions to meet PCI DSS (Payment Card Industry Data Security Standard) requirements. Its web user interface provides reports and dashboards that can help with this and other regulations (e.g. GPG13 or GDPR).
+```c
+OS_AES_Str(input, output, my_key, size, OS_ENCRYPT);
+```
+- If you use a custom IV, update the function to accept and use it.
 
-**Cloud security**
+---
 
-Wazuh helps monitoring cloud infrastructure at an API level, using integration modules that are able to pull security data from well known cloud providers, such as Amazon AWS, Azure or Google Cloud. In addition, Wazuh provides rules to assess the configuration of your cloud environment, easily spotting weaknesses.
+## 3. Agent Installation/Enrollment Steps (with Custom Key Logic)
 
-In addition, Wazuh light-weight and multi-platform agents are commonly used to monitor cloud environments at the instance level.
+1. **Receive or generate the key** using the new logic (from the manager or during enrollment).
+2. **Store the key** in the agent’s key file in the new format.
+3. **Update the agent’s code** to use the key as intended (raw or derived).
+4. **Test communication** between agent and manager to confirm compatibility.
 
-**Containers security**
+---
 
-Wazuh provides security visibility into your Docker hosts and containers, monitoring their behavior and detecting threats, vulnerabilities and anomalies. The Wazuh agent has native integration with the Docker engine allowing users to monitor images, volumes, network settings, and running containers.
+## 4. Example: Minimal Agent-Side Code Change
 
-Wazuh continuously collects and analyzes detailed runtime information. For example, alerting for containers running in privileged mode, vulnerable applications, a shell running in a container, changes to persistent volumes or images, and other possible threats.
+**Before (default, with MD5 derivation):**
+```c
+// In OS_AddKey
+OS_MD5_Str(name, -1, filesum1);
+OS_MD5_Str(id, -1, filesum2);
+snprintf(_finalstr, sizeof(_finalstr), "%s%s", filesum1, filesum2);
+OS_MD5_Str(_finalstr, -1, filesum1);
+filesum1[15] = '\0';
+filesum1[16] = '\0';
+OS_MD5_Str(key, -1, filesum2);
+snprintf(_finalstr, sizeof(_finalstr), "%s%s", filesum2, filesum1);
+os_strdup(_finalstr, keys->keyentries[keys->keysize]->encryption_key);
+```
 
-## WUI
+**After (bypass derivation, use raw key):**
+```c
+// In OS_AddKey
+os_strdup(key, keys->keyentries[keys->keysize]->encryption_key);
+```
 
-The Wazuh WUI provides a powerful user interface for data visualization and analysis. This interface can also be used to manage Wazuh configuration and to monitor its status.
+---
 
-**Modules overview**
+## 5. Where Keys Are Stored
 
-![Modules overview](https://github.com/wazuh/wazuh-dashboard-plugins/raw/master/screenshots/app.png)
+- The file responsible for storing (writing) keys is defined by the macro `KEYS_FILE`.
+- `KEYS_FILE` is defined in `src/headers/defs.h` as:
 
-**Security events**
+```c
+#define KEYS_FILE       "etc/client.keys"
+#define KEYS_FILE       "client.keys"
+```
 
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app2.png)
+- Depending on your build or platform, `KEYS_FILE` will point to either `etc/client.keys` or `client.keys`.
 
-**Integrity monitoring**
+---
 
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app3.png)
+## 6. Source Files for Code Snippets
 
-**Vulnerability detection**
+- **src/os_crypto/shared/keys.c**
+  - Key loading, derivation, and writing.
+- **src/addagent/manage_agents.c**
+  - Key generation if not provided.
+- **src/headers/defs.h**
+  - Definition of the key storage file macro.
+- **src/os_crypto/aes/aes_op.c** (function signature reference)
+  - Usage example for direct key usage in code.
 
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app4.png)
+---
 
-**Regulatory compliance**
+## 7. Summary Table
 
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app5.png)
+| Step                | Default Wazuh                | With Custom Key Handling         |
+|---------------------|------------------------------|----------------------------------|
+| Key Generation      | MD5-based derivation         | Your logic (raw, custom, etc.)   |
+| Key File Format     | id name ip key               | Must match your new format       |
+| Key Usage in Code   | Derived key                  | Raw or custom key                |
+| Agent Code Change   | None                         | Update to match manager logic    |
 
-**Agents overview**
+---
 
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app6.png)
+## 8. Notes
 
-**Agent summary**
+- The IV (Initialization Vector) is currently hardcoded. For best security, consider making it configurable.
+- Always ensure your key is 32 bytes for AES-256.
+- If you modify the key handling, review all usages to ensure compatibility.
 
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app7.png)
-
-## Orchestration
-
-Here you can find all the automation tools maintained by the Wazuh team.
-
-* [Wazuh AWS CloudFormation](https://github.com/wazuh/wazuh-cloudformation)
-
-* [Docker containers](https://github.com/wazuh/wazuh-docker)
-
-* [Wazuh Ansible](https://github.com/wazuh/wazuh-ansible)
-
-* [Wazuh Chef](https://github.com/wazuh/wazuh-chef)
-
-* [Wazuh Puppet](https://github.com/wazuh/wazuh-puppet)
-
-* [Wazuh Kubernetes](https://github.com/wazuh/wazuh-kubernetes)
-
-* [Wazuh Bosh](https://github.com/wazuh/wazuh-bosh)
-
-* [Wazuh Salt](https://github.com/wazuh/wazuh-salt)
-
-## Branches
-
-* `master` branch contains the latest code, be aware of possible bugs on this branch.
-* `stable` branch on correspond to the last Wazuh stable version.
-
-## Software and libraries used
-
-|Software|Version|Author|License|
-|---|---|---|---|
-|[bzip2](https://github.com/libarchive/bzip2)|1.0.8|Julian Seward|BSD License|
-|[cJSON](https://github.com/DaveGamble/cJSON)|1.7.12|Dave Gamble|MIT License|
-|[cPython](https://github.com/python/cpython)|3.10.15|Guido van Rossum|Python Software Foundation License version 2|
-|[cURL](https://github.com/curl/curl)|8.10.0|Daniel Stenberg|MIT License|
-|[Flatbuffers](https://github.com/google/flatbuffers/)|23.5.26|Google Inc.|Apache 2.0 License|
-|[GoogleTest](https://github.com/google/googletest)|1.11.0|Google Inc.|3-Clause "New" BSD License|
-|[jemalloc](https://github.com/jemalloc/jemalloc)|5.2.1|Jason Evans|2-Clause "Simplified" BSD License|
-|[Lua](https://github.com/lua/lua)|5.3.6|PUC-Rio|MIT License|
-|[libarchive](https://github.com/libarchive/libarchive)|3.7.2|Tim Kientzle|3-Clause "New" BSD License|
-|[libdb](https://github.com/yasuhirokimura/db18)|18.1.40|Oracle Corporation|Affero GPL v3|
-|[libffi](https://github.com/libffi/libffi)|3.2.1|Anthony Green|MIT License|
-|[libpcre2](https://github.com/PCRE2Project/pcre2)|10.42.0|Philip Hazel|BSD License|
-|[libplist](https://github.com/libimobiledevice/libplist)|2.2.0|Aaron Burghardt et al.|GNU Lesser General Public License version 2.1|
-|[libYAML](https://github.com/yaml/libyaml)|0.1.7|Kirill Simonov|MIT License|
-|[liblzma](https://github.com/tukaani-project/xz)|5.4.2|Lasse Collin, Jia Tan et al.|GNU Public License version 3|
-|[Linux Audit userspace](https://github.com/linux-audit/audit-userspace)|2.8.4|Rik Faith|LGPL (copyleft)|
-|[msgpack](https://github.com/msgpack/msgpack-c)|3.1.1|Sadayuki Furuhashi|Boost Software License version 1.0|
-|[nlohmann](https://github.com/nlohmann/json)|3.11.2|Niels Lohmann|MIT License|
-|[OpenSSL](https://github.com/openssl/openssl)|3.0.12|OpenSSL Software Foundation|Apache 2.0 License|
-|[pacman](https://gitlab.archlinux.org/pacman/pacman)|5.2.2|Judd Vinet|GNU Public License version 2 (copyleft)|
-|[popt](https://github.com/rpm-software-management/popt)|1.16|Jeff Johnson & Erik Troan|MIT License|
-|[procps](https://gitlab.com/procps-ng/procps)|2.8.3|Brian Edmonds et al.|LGPL (copyleft)|
-|[RocksDB](https://github.com/facebook/rocksdb/)|8.3.2|Facebook Inc.|Apache 2.0 License|
-|[rpm](https://github.com/rpm-software-management/rpm)|4.18.2|Marc Ewing & Erik Troan|GNU Public License version 2 (copyleft)|
-|[sqlite](https://github.com/sqlite/sqlite)|3.45.0|D. Richard Hipp|Public Domain (no restrictions)|
-|[zlib](https://github.com/madler/zlib)|1.3.1|Jean-loup Gailly & Mark Adler|zlib/libpng License|
-
-* [PyPi packages](framework/requirements.txt)
-
-## Documentation
-
-* [Full documentation](http://documentation.wazuh.com)
-* [Wazuh installation guide](https://documentation.wazuh.com/current/installation-guide/index.html)
-
-## Get involved
-
-Become part of the [Wazuh's community](https://wazuh.com/community/) to learn from other users, participate in discussions, talk to our developers and contribute to the project.
-
-If you want to contribute to our project please don’t hesitate to make pull-requests, submit issues or send commits, we will review all your questions.
-
-You can also join our [Slack community channel](https://wazuh.com/community/join-us-on-slack/) and [mailing list](https://groups.google.com/d/forum/wazuh) by sending an email to [wazuh+subscribe@googlegroups.com](mailto:wazuh+subscribe@googlegroups.com), to ask questions and participate in discussions.
-
-Stay up to date on news, releases, engineering articles and more.
-
-* [Wazuh website](http://wazuh.com)
-* [Linkedin](https://www.linkedin.com/company/wazuh)
-* [YouTube](https://www.youtube.com/c/wazuhsecurity)
-* [Twitter](https://twitter.com/wazuh)
-* [Wazuh blog](https://wazuh.com/blog/)
-* [Slack announcements channel](https://wazuh.com/community/join-us-on-slack/)
-
-## Authors
-
-Wazuh Copyright (C) 2015-2023 Wazuh Inc. (License GPLv2)
-
-Based on the OSSEC project started by Daniel Cid.
+---

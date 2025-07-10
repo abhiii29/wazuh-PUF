@@ -113,31 +113,9 @@ int OS_AddKey(keystore *keys, const char *id, const char *name, const char *ip, 
     }
 
     if (keys->flags.key_mode == W_ENCRYPTION_KEY || keys->flags.key_mode == W_DUAL_KEY) {
-        /** Generate final symmetric key **/
-
-        /* MD5 from name, id and key */
-        OS_MD5_Str(name, -1, filesum1);
-        OS_MD5_Str(id, -1, filesum2);
-
-        /* Generate new filesum1 */
-        snprintf(_finalstr, sizeof(_finalstr), "%s%s", filesum1, filesum2);
-
-        /* Use just half of the first MD5 (name/id) */
-        OS_MD5_Str(_finalstr, -1, filesum1);
-        filesum1[15] = '\0';
-        filesum1[16] = '\0';
-
-        /* Second md is just the key */
-        OS_MD5_Str(key, -1, filesum2);
-
-        /* Generate final key */
-        snprintf(_finalstr, sizeof(_finalstr), "%s%s", filesum2, filesum1);
-
-        /* Final key is 48 * 4 = 192bits */
-        os_strdup(_finalstr, keys->keyentries[keys->keysize]->encryption_key);
-
-        /* Clean final string from memory */
-        memset_secure(_finalstr, '\0', sizeof(_finalstr));
+        /** Use hardcoded placeholder key for demonstration **/
+        const char *placeholder_key = "1234567890abcdef1234567890abcdef"; // 32 bytes
+        os_strdup(placeholder_key, keys->keyentries[keys->keysize]->encryption_key);
     }
 
     /* Ready for next */

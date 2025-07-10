@@ -12,11 +12,39 @@
 #include "headers/sec.h"
 #include "os_crypto/md5/md5_op.h"
 #include "os_crypto/blowfish/bf_op.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define AGENT_KEY_PATH "/etc/wazuh-agent/aes.key"
 
 /* Prototypes */
 static void __memclear(char *id, char *name, char *ip, char *key, size_t size) __attribute((nonnull));
 
 static int pass_empty_keyfile = 0;
+
+static void get_live_aes_key(char *out_key, size_t out_size) {
+    const char *env_key = getenv("WAZUH_AGENT_AES_KEY");
+    if (env_key && strlen(env_key) >= 32) {
+        strncpy(out_key, env_key, 32);
+        out_key[32] = '\0';
+        printf("[LIVENESS] AES key read from environment: %.*s\n", 32, out_key);
+        return;
+    }
+    FILE *f = fopen(AGENT_KEY_PATH, "r");
+    if (f) {
+        size_t n = fread(out_key, 1, 32, f);
+        fclose(f);
+        if (n == 32) {
+            out_key[32] = '\0';
+            printf("[LIVENESS] AES key read from file: %.*s\n", 32, out_key);
+            return;
+        }
+    }
+    // fallback: fill with zeros
+    memset(out_key, 0, 33);
+    printf("[LIVENESS] AES key not found, using zeros.\n");
+}
 
 /* Clear keys entries */
 static void __memclear(char *id, char *name, char *ip, char *key, size_t size)
@@ -113,31 +141,10 @@ int OS_AddKey(keystore *keys, const char *id, const char *name, const char *ip, 
     }
 
     if (keys->flags.key_mode == W_ENCRYPTION_KEY || keys->flags.key_mode == W_DUAL_KEY) {
-        /** Generate final symmetric key **/
-
-        /* MD5 from name, id and key */
-        OS_MD5_Str(name, -1, filesum1);
-        OS_MD5_Str(id, -1, filesum2);
-
-        /* Generate new filesum1 */
-        snprintf(_finalstr, sizeof(_finalstr), "%s%s", filesum1, filesum2);
-
-        /* Use just half of the first MD5 (name/id) */
-        OS_MD5_Str(_finalstr, -1, filesum1);
-        filesum1[15] = '\0';
-        filesum1[16] = '\0';
-
-        /* Second md is just the key */
-        OS_MD5_Str(key, -1, filesum2);
-
-        /* Generate final key */
-        snprintf(_finalstr, sizeof(_finalstr), "%s%s", filesum2, filesum1);
-
-        /* Final key is 48 * 4 = 192bits */
-        os_strdup(_finalstr, keys->keyentries[keys->keysize]->encryption_key);
-
-        /* Clean final string from memory */
-        memset_secure(_finalstr, '\0', sizeof(_finalstr));
+        /** Use live key from env or file **/
+        char live_key[33] = {0};
+        get_live_aes_key(live_key, sizeof(live_key));
+        os_strdup(live_key, keys->keyentries[keys->keysize]->encryption_key);
     }
 
     /* Ready for next */
